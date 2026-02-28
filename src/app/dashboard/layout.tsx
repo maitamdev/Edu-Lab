@@ -47,13 +47,45 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             return;
         }
 
-        const { data } = await supabase
+        let { data } = await supabase
             .from("profiles")
             .select("*")
             .eq("id", user.id)
             .single();
 
-        if (data) setProfile(data);
+        // Auto-create profile if trigger didn't fire (race condition / first login)
+        if (!data) {
+            const name =
+                user.user_metadata?.name ||
+                user.user_metadata?.full_name ||
+                user.email?.split("@")[0] ||
+                "Người dùng";
+            const role = user.user_metadata?.role || "student";
+
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const { data: upserted } = await (supabase as any)
+                .from("profiles")
+                .upsert({
+                    id: user.id,
+                    name,
+                    email: user.email ?? "",
+                    role: (role as string) || "student",
+                    xp: 0,
+                    streak: 0,
+                    level: 1,
+                })
+                .select()
+                .single();
+
+            if (upserted) data = upserted;
+        }
+
+        if (data) {
+            setProfile(data);
+        } else {
+            // Still couldn't load profile — redirect to login
+            router.push("/login");
+        }
     }, [supabase, router]);
 
     const fetchUnreadNotifications = useCallback(async () => {
