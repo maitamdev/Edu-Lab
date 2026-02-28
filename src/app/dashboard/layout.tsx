@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
@@ -8,36 +8,19 @@ import { ThemeToggle } from "@/components/theme-toggle";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Input } from "@/components/ui/input";
 import {
-    DropdownMenu,
-    DropdownMenuContent,
-    DropdownMenuItem,
-    DropdownMenuLabel,
-    DropdownMenuSeparator,
-    DropdownMenuTrigger,
+    DropdownMenu, DropdownMenuContent, DropdownMenuItem,
+    DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
 import {
-    FlaskConical,
-    Home,
-    TestTubes,
-    GraduationCap,
-    Bot,
-    Trophy,
-    UserCircle,
-    Search,
-    Bell,
-    Menu,
-    LogOut,
-    Settings,
-    PanelLeftClose,
-    PanelLeft,
+    FlaskConical, Home, TestTubes, GraduationCap, Bot, Trophy,
+    UserCircle, Search, Bell, Menu, LogOut, Settings,
+    PanelLeftClose, PanelLeft,
 } from "lucide-react";
+import { createClient } from "@/lib/supabase/client";
+import type { Database } from "@/types/database";
 
-interface UserData {
-    name: string;
-    email: string;
-    role: string;
-}
+type Profile = Database["public"]["Tables"]["profiles"]["Row"];
 
 const navItems = [
     { icon: Home, label: "Trang chủ", href: "/dashboard", active: true },
@@ -49,36 +32,87 @@ const navItems = [
     { icon: UserCircle, label: "Hồ sơ", href: "#" },
 ];
 
-export default function DashboardLayout({
-    children,
-}: {
-    children: React.ReactNode;
-}) {
+export default function DashboardLayout({ children }: { children: React.ReactNode }) {
     const router = useRouter();
-    const [user, setUser] = useState<UserData | null>(null);
+    const [profile, setProfile] = useState<Profile | null>(null);
     const [collapsed, setCollapsed] = useState(false);
     const [mounted, setMounted] = useState(false);
+    const [unreadCount, setUnreadCount] = useState(0);
+    const supabase = createClient();
 
-    useEffect(() => {
-        setMounted(true);
-        const auth = localStorage.getItem("edulab_auth");
-        const userData = localStorage.getItem("edulab_user");
-        if (!auth) {
+    const fetchProfile = useCallback(async () => {
+        const { data: { user } } = await supabase.auth.getUser();
+        if (!user) {
             router.push("/login");
             return;
         }
-        if (userData) {
-            setUser(JSON.parse(userData));
-        }
-    }, [router]);
 
-    const handleLogout = () => {
-        localStorage.removeItem("edulab_auth");
-        localStorage.removeItem("edulab_user");
+        const { data } = await supabase
+            .from("profiles")
+            .select("*")
+            .eq("id", user.id)
+            .single();
+
+        if (data) setProfile(data);
+    }, [supabase, router]);
+
+    const fetchUnreadNotifications = useCallback(async () => {
+        const { data: { user } } = await supabase.auth.getUser();
+        if (!user) return;
+
+        const { count } = await supabase
+            .from("notifications")
+            .select("*", { count: "exact", head: true })
+            .eq("user_id", user.id)
+            .eq("read", false);
+
+        setUnreadCount(count ?? 0);
+    }, [supabase]);
+
+    useEffect(() => {
+        setMounted(true);
+        fetchProfile();
+        fetchUnreadNotifications();
+    }, [fetchProfile, fetchUnreadNotifications]);
+
+    // Realtime: subscribe to notifications changes
+    useEffect(() => {
+        let channel: ReturnType<typeof supabase.channel> | null = null;
+
+        const setupRealtime = async () => {
+            const { data: { user } } = await supabase.auth.getUser();
+            if (!user) return;
+
+            channel = supabase
+                .channel("notifications-changes")
+                .on(
+                    "postgres_changes",
+                    {
+                        event: "*",
+                        schema: "public",
+                        table: "notifications",
+                        filter: `user_id=eq.${user.id}`,
+                    },
+                    () => {
+                        fetchUnreadNotifications();
+                    }
+                )
+                .subscribe();
+        };
+
+        setupRealtime();
+        return () => {
+            if (channel) supabase.removeChannel(channel);
+        };
+    }, [supabase, fetchUnreadNotifications]);
+
+    const handleLogout = async () => {
+        await supabase.auth.signOut();
         router.push("/login");
+        router.refresh();
     };
 
-    if (!mounted || !user) {
+    if (!mounted || !profile) {
         return (
             <div className="min-h-screen flex items-center justify-center bg-background">
                 <div className="flex flex-col items-center gap-4">
@@ -91,7 +125,7 @@ export default function DashboardLayout({
         );
     }
 
-    const initials = user.name
+    const initials = profile.name
         .split(" ")
         .map((n) => n[0])
         .join("")
@@ -100,7 +134,6 @@ export default function DashboardLayout({
 
     const SidebarContent = ({ mobile = false }: { mobile?: boolean }) => (
         <div className="flex flex-col h-full">
-            {/* Logo */}
             <div className={`flex items-center h-16 px-4 border-b ${collapsed && !mobile ? "justify-center" : "gap-2.5"}`}>
                 <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-purple-600 to-blue-500 flex items-center justify-center flex-shrink-0 shadow-lg shadow-purple-500/25">
                     <FlaskConical className="w-5 h-5 text-white" />
@@ -110,7 +143,6 @@ export default function DashboardLayout({
                 )}
             </div>
 
-            {/* Nav items */}
             <nav className="flex-1 p-3 space-y-1">
                 {navItems.map((item, i) => (
                     <Link
@@ -122,16 +154,12 @@ export default function DashboardLayout({
                             } ${collapsed && !mobile ? "justify-center" : ""}`}
                         title={collapsed && !mobile ? item.label : undefined}
                     >
-                        <item.icon
-                            className={`w-5 h-5 flex-shrink-0 ${item.active ? "text-primary" : "group-hover:text-foreground"
-                                }`}
-                        />
+                        <item.icon className={`w-5 h-5 flex-shrink-0 ${item.active ? "text-primary" : "group-hover:text-foreground"}`} />
                         {(!collapsed || mobile) && <span>{item.label}</span>}
                     </Link>
                 ))}
             </nav>
 
-            {/* Collapse toggle (desktop only) */}
             {!mobile && (
                 <div className="p-3 border-t">
                     <Button
@@ -157,24 +185,15 @@ export default function DashboardLayout({
     return (
         <div className="min-h-screen bg-background">
             {/* Desktop Sidebar */}
-            <aside
-                className={`hidden lg:flex flex-col fixed inset-y-0 left-0 z-30 border-r bg-card transition-all duration-300 ${collapsed ? "w-[72px]" : "w-64"
-                    }`}
-            >
+            <aside className={`hidden lg:flex flex-col fixed inset-y-0 left-0 z-30 border-r bg-card transition-all duration-300 ${collapsed ? "w-[72px]" : "w-64"}`}>
                 <SidebarContent />
             </aside>
 
-            {/* Main content area */}
-            <div
-                className={`transition-all duration-300 ${collapsed ? "lg:ml-[72px]" : "lg:ml-64"
-                    }`}
-            >
+            <div className={`transition-all duration-300 ${collapsed ? "lg:ml-[72px]" : "lg:ml-64"}`}>
                 {/* Top Navbar */}
                 <header className="sticky top-0 z-20 h-16 border-b bg-card/80 backdrop-blur-xl">
                     <div className="flex items-center justify-between h-full px-4 sm:px-6">
-                        {/* Left: Mobile menu + Search */}
                         <div className="flex items-center gap-3">
-                            {/* Mobile menu */}
                             <Sheet>
                                 <SheetTrigger asChild>
                                     <Button variant="ghost" size="icon" className="lg:hidden">
@@ -186,7 +205,6 @@ export default function DashboardLayout({
                                 </SheetContent>
                             </Sheet>
 
-                            {/* Search */}
                             <div className="hidden sm:flex relative">
                                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
                                 <Input
@@ -196,38 +214,36 @@ export default function DashboardLayout({
                             </div>
                         </div>
 
-                        {/* Right: Actions */}
                         <div className="flex items-center gap-2">
                             <ThemeToggle />
 
                             <Button variant="ghost" size="icon" className="relative rounded-full">
                                 <Bell className="w-5 h-5" />
-                                <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-red-500 rounded-full" />
+                                {unreadCount > 0 && (
+                                    <span className="absolute top-1 right-1 flex items-center justify-center min-w-[16px] h-4 px-0.5 text-[10px] font-bold bg-red-500 text-white rounded-full">
+                                        {unreadCount > 9 ? "9+" : unreadCount}
+                                    </span>
+                                )}
                             </Button>
 
                             <DropdownMenu>
                                 <DropdownMenuTrigger asChild>
-                                    <Button
-                                        variant="ghost"
-                                        className="flex items-center gap-2 pl-2 pr-3 h-9 rounded-full"
-                                    >
+                                    <Button variant="ghost" className="flex items-center gap-2 pl-2 pr-3 h-9 rounded-full">
                                         <Avatar className="w-7 h-7">
                                             <AvatarFallback className="bg-gradient-to-br from-purple-600 to-blue-500 text-white text-xs font-medium">
                                                 {initials}
                                             </AvatarFallback>
                                         </Avatar>
                                         <span className="hidden sm:inline text-sm font-medium max-w-[100px] truncate">
-                                            {user.name}
+                                            {profile.name}
                                         </span>
                                     </Button>
                                 </DropdownMenuTrigger>
                                 <DropdownMenuContent align="end" className="w-56">
                                     <DropdownMenuLabel>
                                         <div className="flex flex-col">
-                                            <span className="font-semibold">{user.name}</span>
-                                            <span className="text-xs text-muted-foreground font-normal">
-                                                {user.email}
-                                            </span>
+                                            <span className="font-semibold">{profile.name}</span>
+                                            <span className="text-xs text-muted-foreground font-normal">{profile.email}</span>
                                         </div>
                                     </DropdownMenuLabel>
                                     <DropdownMenuSeparator />
@@ -250,7 +266,6 @@ export default function DashboardLayout({
                     </div>
                 </header>
 
-                {/* Page content */}
                 <main className="p-4 sm:p-6 lg:p-8">{children}</main>
             </div>
         </div>
